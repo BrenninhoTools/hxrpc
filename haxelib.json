@@ -1,0 +1,12 @@
+{
+    "name": "hxrpc",
+    "url": "https://github.com/Brenninho123/hxrpc",
+    "license": "MIT",
+    "tags": ["discord", "rpc", "presence", "haxeflixel", "openfl"],
+    "description": "Discord Rich Presence on desktop, webhook-based status on mobile",
+    "classPath": "src",
+    "version": "0.1.0",
+    "releasenote": "Initial release",
+    "contributors": ["Brenninho"],
+    "dependencies": {}
+}
