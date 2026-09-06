@@ -1,13 +1,25 @@
-# hxrpc
+<p align="center">
+  <img src="arts/logo.png" alt="hxrpc logo" width="220">
+</p>
 
-[![Haxelib](https://img.shields.io/badge/haxelib-hxrpc-orange.svg)](https://lib.haxe.org/p/hxrpc)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Platforms](https://img.shields.io/badge/platforms-windows%20%7C%20macos%20%7C%20linux%20%7C%20android%20%7C%20ios%20%7C%20html5-lightgrey.svg)](#platform-support)
-[![Haxe](https://img.shields.io/badge/haxe-4.x-blueviolet.svg)](https://haxe.org)
+<h1 align="center">hxrpc</h1>
 
+<p align="center">
+  <a href="https://lib.haxe.org/p/hxrpc"><img src="https://img.shields.io/badge/haxelib-hxrpc-orange.svg" alt="Haxelib"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/platforms-windows%20%7C%20macos%20%7C%20linux%20%7C%20android%20%7C%20ios%20%7C%20html5-lightgrey.svg" alt="Platforms">
+  <img src="https://img.shields.io/badge/haxe-4.x-blueviolet.svg" alt="Haxe">
+</p>
+
+<p align="center">
 A cross-platform Discord presence library for Haxe. Real Rich Presence on desktop via native IPC, and a webhook-based status fallback on mobile and web, where Discord exposes no public API for setting profile presence from those environments.
+</p>
 
-`discord` `rpc` `rich-presence` `haxeflixel` `openfl` `webhook` `ipc`
+<p align="center">
+<code>discord</code> · <code>rpc</code> · <code>rich-presence</code> · <code>haxeflixel</code> · <code>openfl</code> · <code>webhook</code> · <code>ipc</code>
+</p>
+
+---
 
 ## Table of contents
 
