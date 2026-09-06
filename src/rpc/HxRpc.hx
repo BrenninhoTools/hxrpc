@@ -2,9 +2,22 @@ package rpc;
 
 import discord.Activity;
 import discord.Backend;
+import haxe.Timer;
+
+typedef HxRpcConfig = {
+    var ?autoReconnect:Bool;
+    var ?reconnectInterval:Float;
+    var ?maxReconnectAttempts:Int;
+    var ?rateLimitInterval:Float;
+}
 
 class HxRpc {
     public static var connected(default, null):Bool = false;
+    public static var autoReconnect:Bool = true;
+    public static var reconnectInterval:Float = 5.0;
+    public static var maxReconnectAttempts:Int = 10;
+    public static var rateLimitInterval:Float = 1.2;
+
     public static var onConnected:Void->Void;
     public static var onDisconnected:Void->Void;
     public static var onError:String->Void;
@@ -13,10 +26,28 @@ class HxRpc {
     static var storedClientId:String;
     static var storedWebhookUrl:String;
     static var current:Activity = {};
+    static var pendingActivity:Activity;
 
-    public static function init(clientId:String, ?webhookUrl:String):Bool {
+    static var reconnectTimer:Timer;
+    static var rateLimitTimer:Timer;
+    static var currentReconnectAttempts:Int = 0;
+    static var lastUpdateTime:Float = 0;
+
+    public static function init(clientId:String, ?webhookUrl:String, ?config:HxRpcConfig):Bool {
+        if (clientId == null || clientId == "") {
+            dispatchError("Initialization failed: Client ID is missing.");
+            return false;
+        }
+
         storedClientId = clientId;
         storedWebhookUrl = webhookUrl;
+
+        if (config != null) {
+            if (config.autoReconnect != null) autoReconnect = config.autoReconnect;
+            if (config.reconnectInterval != null) reconnectInterval = config.reconnectInterval;
+            if (config.maxReconnectAttempts != null) maxReconnectAttempts = config.maxReconnectAttempts;
+            if (config.rateLimitInterval != null) rateLimitInterval = config.rateLimitInterval;
+        }
 
         #if (windows || mac || linux)
         backend = new discord.native.DiscordIPC();
@@ -27,90 +58,242 @@ class HxRpc {
         #end
 
         if (backend == null) {
-            connected = false;
-            if (onError != null) onError("No backend available for this target");
+            setConnected(false);
+            dispatchError("No RPC backend available for this target platform.");
             return false;
         }
 
-        connected = backend.connect(clientId);
+        currentReconnectAttempts = 0;
+        return connectInternal();
+    }
+
+    public static function setActivity(activity:Activity):Bool {
+        pendingActivity = activity;
+
+        var now:Float = Date.now().getTime() / 1000;
+        if (now - lastUpdateTime < rateLimitInterval) {
+            scheduleRateLimitedUpdate();
+            return false;
+        }
+
+        return dispatchActivity(activity);
+    }
+
+    public static function setDetails(details:String, ?state:String):Bool {
+        var activity:Activity = cloneActivity(current);
+        activity.details = details;
+        if (state != null) activity.state = state;
+        return setActivity(activity);
+    }
+
+    public static function setState(state:String):Bool {
+        var activity:Activity = cloneActivity(current);
+        activity.state = state;
+        return setActivity(activity);
+    }
+
+    public static function setTimestamps(start:Float, ?end:Float):Bool {
+        var activity:Activity = cloneActivity(current);
+        activity.startTimestamp = start;
+        activity.endTimestamp = end;
+        return setActivity(activity);
+    }
+
+    public static function setImages(largeImageKey:String, ?largeImageText:String, ?smallImageKey:String, ?smallImageText:String):Bool {
+        var activity:Activity = cloneActivity(current);
+        activity.largeImageKey = largeImageKey;
+        activity.largeImageText = largeImageText;
+        activity.smallImageKey = smallImageKey;
+        activity.smallImageText = smallImageText;
+        return setActivity(activity);
+    }
+
+    public static function setParty(partyId:String, size:Int, max:Int):Bool {
+        var activity:Activity = cloneActivity(current);
+        activity.partyId = partyId;
+        activity.partySize = size;
+        activity.partyMax = max;
+        return setActivity(activity);
+    }
+
+    public static function setSecrets(match:String, ?join:String, ?spectate:String):Bool {
+        var activity:Activity = cloneActivity(current);
+        activity.matchSecret = match;
+        activity.joinSecret = join;
+        activity.spectateSecret = spectate;
+        return setActivity(activity);
+    }
+
+    public static function setButtons(buttons:Array<{label:String, url:String}>):Bool {
+        var activity:Activity = cloneActivity(current);
+        activity.buttons = buttons;
+        return setActivity(activity);
+    }
+
+    public static function clearActivity():Bool {
+        stopRateLimitTimer();
+        pendingActivity = null;
+        current = {};
+
+        if (!checkConnection()) return false;
+        var ok:Bool = backend.clearActivity();
+        if (!ok) dispatchError("Failed to clear activity.");
+        return ok;
+    }
+
+    public static function reconnect():Bool {
+        if (storedClientId == null) {
+            dispatchError("Cannot reconnect before init() was called.");
+            return false;
+        }
+        stopReconnectTimer();
+        currentReconnectAttempts = 0;
+        return connectInternal();
+    }
+
+    public static function shutdown():Void {
+        stopReconnectTimer();
+        stopRateLimitTimer();
+
+        if (backend != null) {
+            backend.clearActivity();
+            backend.disconnect();
+        }
+
+        setConnected(false);
+        backend = null;
+        current = {};
+        pendingActivity = null;
+        storedClientId = null;
+        storedWebhookUrl = null;
+        onConnected = null;
+        onDisconnected = null;
+        onError = null;
+    }
+
+    static function dispatchActivity(activity:Activity):Bool {
+        if (!checkConnection()) return false;
+
+        current = activity;
+        pendingActivity = null;
+        lastUpdateTime = Date.now().getTime() / 1000;
+
+        var ok:Bool = backend.setActivity(activity);
+        if (!ok) dispatchError("Failed to set activity payload.");
+        return ok;
+    }
+
+    static function scheduleRateLimitedUpdate():Void {
+        if (rateLimitTimer != null) return;
+
+        var delay:Int = Std.int(rateLimitInterval * 1000);
+        rateLimitTimer = new Timer(delay);
+        rateLimitTimer.run = function() {
+            stopRateLimitTimer();
+            if (pendingActivity != null) {
+                dispatchActivity(pendingActivity);
+            }
+        };
+    }
+
+    static function connectInternal():Bool {
+        if (backend == null) return false;
+
+        var status:Bool = backend.connect(storedClientId);
+        setConnected(status);
 
         if (connected) {
-            if (onConnected != null) onConnected();
-        } else if (onError != null) {
-            onError("Failed to connect to Discord");
+            stopReconnectTimer();
+            currentReconnectAttempts = 0;
+            if (pendingActivity != null) {
+                dispatchActivity(pendingActivity);
+            } else if (current != null) {
+                dispatchActivity(current);
+            }
+        } else {
+            dispatchError("Failed to connect to Discord.");
+            if (autoReconnect) {
+                scheduleReconnect();
+            }
         }
 
         return connected;
     }
 
-    public static function reconnect():Bool {
-        if (storedClientId == null) {
-            if (onError != null) onError("Cannot reconnect before init() was called");
-            return false;
+    static function checkConnection():Bool {
+        if (!connected && autoReconnect && storedClientId != null) {
+            connectInternal();
         }
-        shutdown();
-        return init(storedClientId, storedWebhookUrl);
+        return connected && backend != null;
     }
 
-    public static function setActivity(activity:Activity):Bool {
-        if (!connected || backend == null) return false;
-        current = activity;
-        var ok = backend.setActivity(activity);
-        if (!ok && onError != null) onError("Failed to set activity");
-        return ok;
+    static function scheduleReconnect():Void {
+        if (reconnectTimer != null) return;
+        if (maxReconnectAttempts > 0 && currentReconnectAttempts >= maxReconnectAttempts) {
+            dispatchError("Max reconnection attempts reached.");
+            return;
+        }
+
+        currentReconnectAttempts++;
+        var delay:Int = Std.int(reconnectInterval * 1000 * Math.min(currentReconnectAttempts, 4));
+
+        reconnectTimer = new Timer(delay);
+        reconnectTimer.run = function() {
+            stopReconnectTimer();
+            if (!connected && storedClientId != null) {
+                connectInternal();
+            }
+        };
     }
 
-    public static function setDetails(details:String, ?state:String):Bool {
-        current.details = details;
-        if (state != null) current.state = state;
-        return setActivity(current);
+    static function setConnected(value:Bool):Void {
+        if (connected != value) {
+            connected = value;
+            if (connected) {
+                if (onConnected != null) onConnected();
+            } else {
+                if (onDisconnected != null) onDisconnected();
+            }
+        }
     }
 
-    public static function setState(state:String):Bool {
-        current.state = state;
-        return setActivity(current);
+    static function dispatchError(message:String):Void {
+        if (onError != null) onError(message);
     }
 
-    public static function setTimestamps(start:Float, ?end:Float):Bool {
-        current.startTimestamp = start;
-        current.endTimestamp = end;
-        return setActivity(current);
+    static function cloneActivity(src:Activity):Activity {
+        if (src == null) return {};
+        return {
+            details: src.details,
+            state: src.state,
+            startTimestamp: src.startTimestamp,
+            endTimestamp: src.endTimestamp,
+            largeImageKey: src.largeImageKey,
+            largeImageText: src.largeImageText,
+            smallImageKey: src.smallImageKey,
+            smallImageText: src.smallImageText,
+            partyId: src.partyId,
+            partySize: src.partySize,
+            partyMax: src.partyMax,
+            matchSecret: src.matchSecret,
+            joinSecret: src.joinSecret,
+            spectateSecret: src.spectateSecret,
+            instance: src.instance,
+            buttons: src.buttons
+        };
     }
 
-    public static function setImages(largeImageKey:String, ?largeImageText:String, ?smallImageKey:String, ?smallImageText:String):Bool {
-        current.largeImageKey = largeImageKey;
-        current.largeImageText = largeImageText;
-        current.smallImageKey = smallImageKey;
-        current.smallImageText = smallImageText;
-        return setActivity(current);
+    static function stopReconnectTimer():Void {
+        if (reconnectTimer != null) {
+            reconnectTimer.stop();
+            reconnectTimer = null;
+        }
     }
 
-    public static function setParty(partyId:String, size:Int, max:Int):Bool {
-        current.partyId = partyId;
-        current.partySize = size;
-        current.partyMax = max;
-        return setActivity(current);
-    }
-
-    public static function setButtons(buttons:Array<{label:String, url:String}>):Bool {
-        current.buttons = buttons;
-        return setActivity(current);
-    }
-
-    public static function clearActivity():Bool {
-        if (!connected || backend == null) return false;
-        current = {};
-        var ok = backend.clearActivity();
-        if (!ok && onError != null) onError("Failed to clear activity");
-        return ok;
-    }
-
-    public static function shutdown():Void {
-        if (backend != null) backend.disconnect();
-        var wasConnected = connected;
-        connected = false;
-        backend = null;
-        current = {};
-        if (wasConnected && onDisconnected != null) onDisconnected();
+    static function stopRateLimitTimer():Void {
+        if (rateLimitTimer != null) {
+            rateLimitTimer.stop();
+            rateLimitTimer = null;
+        }
     }
 }
